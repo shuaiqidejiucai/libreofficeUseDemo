@@ -1,2 +1,0 @@
-# libreofficeUseDemo
-libreoffice test project
