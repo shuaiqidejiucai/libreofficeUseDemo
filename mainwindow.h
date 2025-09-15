@@ -94,18 +94,36 @@ private slots:
     //提取附件
     void on_pushButton_4_clicked();
 
+    //删除附件
+    void on_pushButton_5_clicked();
+
 private:
     void reloadWord();
     void reloadExcel();
     void reloadPowerPoint();
     void insertAttachment(const uno::Reference<lang::XComponent>& xComponent, const QByteArray& fileData, const QString& fileName);
-    void parseItem(libolecf_item_t* root_item);
+    
+    void removeAttachment(const QString& name);
+
+    void removeTextContext(const QString& objName);
+
+    void parserStorage(uno::Reference<embed::XStorage> docStorage);
+
+    void parseItem(libolecf_item_t* root_item, QHash<QString, QByteArray>& oleFileHash);
+
+    bool removeItem(libolecf_item_t* root_item, const QString& rootName);
 
     bool parseOle10Native(const QByteArray& src, QString& outFileName, QByteArray& outData, bool getStream = true);
 
     QByteArray readItemData(libolecf_item_t* item);
 
     QByteArray readStreamToQByteArray(const uno::Reference<io::XInputStream>& xIn);
+    
+    //// libcfb 相关函数
+    //void removeAttachmentCFB(const QString &attachmentName);
+    //void extractAttachmentCFB(const QString &attachmentName, const QString &outputPath);
+    //void insertAttachmentCFB(const QString &attachmentPath, const QString &attachmentName);
+    //
 private:
     Ui::MainWindow *ui;
     uno::Reference<lang::XMultiComponentFactory > m_xMcf;
