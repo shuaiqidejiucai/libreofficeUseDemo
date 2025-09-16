@@ -105,13 +105,13 @@ private:
     
     void removeAttachment(const QString& name);
 
-    void removeTextContext(const QString& objName);
+    void removeStream(const QString& name);
 
-    void parserStorage(uno::Reference<embed::XStorage> docStorage);
+    bool attachmentName(const QByteArray& srcData, QString& fileName);
 
     void parseItem(libolecf_item_t* root_item, QHash<QString, QByteArray>& oleFileHash);
 
-    bool removeItem(libolecf_item_t* root_item, const QString& rootName);
+    void getFileName(libolecf_item_t* root_item, QString& rootName);
 
     bool parseOle10Native(const QByteArray& src, QString& outFileName, QByteArray& outData, bool getStream = true);
 
