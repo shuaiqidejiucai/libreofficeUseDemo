@@ -375,59 +375,12 @@ void MainWindow::reloadWord()
 		qDebug() << OUStringToQString(nameStrObj);
 	}
 
+	//附件的对象名不是附件名，不需要真名
 	ui->listWidget_2->clear();
-
-
-
-	libolecf_file_t* olecf_file = nullptr;
-	//遍历附件
-	if (!olecf_file)
-	{
-		if (libolecf_file_initialize(&olecf_file, NULL) != 1)
-		{
-			qCritical() << "Unable to initialize libolecf.";
-			return;
-		}
-	}
-	libolecf_item_t* root_item = NULL;
-	QString attachment = m_filePath.replace("/", "\\\\");
-	libolecf_error_t* error = NULL;
-	if (libolecf_file_open(olecf_file, attachment.toUtf8().data(), LIBOLECF_OPEN_READ, &error) != 1) {
-		qCritical() << "Unable to open OLECF file:" << attachment;
-
-		if (error) {
-			char error_string[1024] = { 0 };
-			libolecf_error_backtrace_sprint(error, error_string, sizeof(error_string));
-			qCritical() << "libolecf error:" << error_string;
-			libolecf_error_free(&error);
-		}
-		else {
-			qCritical() << "libolecf error object is NULL (likely not an OLECF file?)";
-		}
-		return;
-	}
-
-	if (libolecf_file_get_root_item(olecf_file, &root_item, NULL) != 1) {
-		qCritical() << "Unable to get root item.";
-		return;
-	}
-
-	QHash<QString, QByteArray> oleFileHash;
-	parseItem(root_item, oleFileHash);
-	// 遍历子项，查找 Ole10Native 流
-	// 清理
-	libolecf_item_free(&root_item, NULL);
-	libolecf_file_free(&olecf_file, NULL);
-	olecf_file = nullptr;
-	QHash<QString, QByteArray>::iterator it;
-
-	for (it = oleFileHash.begin(); it != oleFileHash.end(); ++it)
-	{
-		QListWidgetItem* item = new QListWidgetItem(ui->listWidget_2);
-		item->setText(it.key());
-		item->setData(Qt::UserRole + 1, it.value());
-		ui->listWidget_2->addItem(item);
-	}
+	uno::Reference<document::XStorageBasedDocument> xDocBaseStorage(m_xTextDoc, uno::UNO_QUERY_THROW);
+	uno::Reference<embed::XStorage> xDocStorage = xDocBaseStorage->getDocumentStorage();
+	QStringList nameList = getOLEAttachmentFileNameList(xDocStorage);
+	ui->listWidget_2->addItems(nameList);
 }
 
 void MainWindow::reloadExcel()
@@ -479,11 +432,6 @@ void MainWindow::reloadExcel()
 void MainWindow::reloadPowerPoint()
 {
 
-}
-
-int littleToBigByte()
-{
-	return 0;
 }
 
 void MainWindow::insertAttachment(const uno::Reference<lang::XComponent>& xComponent, const QByteArray& fileData, const QString& fileName)
@@ -690,7 +638,8 @@ bool MainWindow::attachmentName(const QByteArray& srcData, QString &fileName)
 	libolecf_item_t* root_item = nullptr;
 	if (libolecf_file_get_root_item(olecf2_file, &root_item, nullptr) == 1)
 	{
-		getFileName(root_item, fileName);
+		QByteArray data;
+		getOle10NativeData(root_item, fileName, data);
 		if (!fileName.isEmpty())
 		{
 			successful = true;
@@ -854,7 +803,7 @@ void MainWindow::parseItem(libolecf_item_t *root_item, QHash<QString, QByteArray
 	}
 }
 
-void MainWindow::getFileName(libolecf_item_t* root_item, QString& rootName)
+void MainWindow::getOle10NativeData(libolecf_item_t* root_item, QString& rootName, QByteArray & outData)
 {
 	int number_of_sub_items = 0;
 	libolecf_item_get_number_of_sub_items(root_item, &number_of_sub_items, NULL);
@@ -874,24 +823,23 @@ void MainWindow::getFileName(libolecf_item_t* root_item, QString& rootName)
 		{
 			QByteArray ole10 = readItemData(sub_item);
 			QString fileName;
-			QByteArray fileData;
-			if (parseOle10Native(ole10, fileName, fileData))
+			if (parseOle10Native(ole10, fileName, outData))
 			{
 				rootName = fileName;
 				libolecf_item_free(&sub_item, nullptr);
 				return;
 			}
 		}
-		if (childItemCount > 0)
+		if (childItemCount > 0 && outData.isEmpty())
 		{
-			getFileName(sub_item, rootName);
+			getOle10NativeData(sub_item, rootName, outData);
 		}
 		libolecf_item_free(&sub_item, nullptr);
 	}
 	return;
 }
 
-bool MainWindow::parseOle10Native(const QByteArray &src, QString &outFileName, QByteArray &outData, bool getStream)
+bool MainWindow::parseOle10Native(const QByteArray &src, QString &outFileName, QByteArray &outData)
 {
     outFileName.clear();
     outData.clear();
@@ -989,6 +937,127 @@ QByteArray MainWindow::readStreamToQByteArray(const uno::Reference<io::XInputStr
 	return result;
 }
 
+bool MainWindow::getAttachmentInfo(QByteArray& srcData, QString& fileName, QByteArray& outFileData)
+{
+	bool successful = false;
+	QByteArray buffer = srcData;
+	libbfio_handle_t* bfio_handle = nullptr;
+	libcerror_error_t* bfio_error = nullptr;
+
+	libcerror_error_t* rangeBfio_error = nullptr;
+	if (libbfio_memory_range_initialize(&bfio_handle, &rangeBfio_error) != 1)
+	{
+		return successful;
+	}
+
+	// 2. 设置内存数据
+	if (libbfio_memory_range_set(
+		bfio_handle,
+		reinterpret_cast<uint8_t*>(buffer.data()),
+		buffer.size(),
+		&bfio_error) != 1) {
+		libbfio_handle_free(&bfio_handle, nullptr);
+		return successful;
+	}
+
+	// 初始化 libolecf 对象
+	libolecf_error_t* error = nullptr;
+	libolecf_file_t* olecf2_file = nullptr;
+	if (libolecf_file_initialize(&olecf2_file, nullptr) != 1)
+	{
+		qCritical() << "Unable to initialize libolecf.";
+		libbfio_handle_free(&bfio_handle, nullptr);
+		return successful;
+	}
+
+	// 使用内存句柄打开 OLECF
+	if (libolecf_file_open_file_io_handle(
+		olecf2_file,
+		bfio_handle,
+		LIBOLECF_OPEN_READ,
+		&error) != 1)
+	{
+		qCritical() << "Unable to open OLECF from memory.";
+		libolecf_file_free(&olecf2_file, nullptr);
+		libbfio_handle_free(&bfio_handle, nullptr);
+		return successful;
+	}
+	// 获取根项并解析
+	libolecf_item_t* root_item = nullptr;
+	if (libolecf_file_get_root_item(olecf2_file, &root_item, nullptr) == 1)
+	{
+		getOle10NativeData(root_item, fileName, outFileData);
+		if (!fileName.isEmpty())
+		{
+			successful = true;
+		}
+
+		libolecf_item_free(&root_item, nullptr);
+	}
+
+	// 清理资源
+	libolecf_file_free(&olecf2_file, nullptr);
+	libbfio_handle_free(&bfio_handle, nullptr);
+	return successful;
+}
+
+QStringList MainWindow::getOLEAttachmentFileNameList(uno::Reference<embed::XStorage> XStorage)
+{
+	QStringList qsNameList;
+	uno::Reference<document::XStorageBasedDocument> xDocBaseStorage(m_xTextDoc, uno::UNO_QUERY_THROW);
+	uno::Reference<embed::XStorage> xDocStorage = xDocBaseStorage->getDocumentStorage();
+	uno::Reference<text::XTextEmbeddedObjectsSupplier> xSupplier(m_xTextDoc, uno::UNO_QUERY);
+	uno::Reference<container::XNameAccess> xEmbeddedObjects = xSupplier->getEmbeddedObjects();
+
+	if (xEmbeddedObjects.is())
+	{
+		uno::Sequence<rtl::OUString> elementNameQuence = xEmbeddedObjects->getElementNames();
+		int length = elementNameQuence.getLength();
+		rtl::OUString* elementNameArray = elementNameQuence.getArray();
+		for (int i = 0; i < length; ++i)
+		{
+			rtl::OUString elementName = elementNameArray[i];
+			uno::Any any = xEmbeddedObjects->getByName(elementName);
+			uno::Reference<beans::XPropertySet> xProps(any, uno::UNO_QUERY);
+			rtl::OUString streamName;
+			xProps->getPropertyValue("StreamName") >>= streamName;
+			uno::Reference<io::XStream> sStream;
+			if (xDocStorage->isStorageElement(streamName))
+			{
+				xDocStorage->openStorageElement(streamName, embed::ElementModes::READWRITE);
+			}
+
+			if (xDocStorage->isStreamElement(streamName))
+			{
+				try
+				{
+					sStream = xDocStorage->cloneStreamElement(streamName);
+				}
+				catch (const uno::Exception& e)
+				{
+					qDebug() << OUStringToQString(e.Message);
+				}
+			}
+
+			if (sStream.is())
+			{
+				uno::Reference<io::XInputStream> inputStream = sStream->getInputStream();
+				if (inputStream.is())
+				{
+					QByteArray buffer = readStreamToQByteArray(inputStream);
+					QString fileName;
+					bool successful = attachmentName(buffer, fileName);
+					if (successful)
+					{
+						qsNameList.append(fileName);
+					}
+				}
+			}
+		}
+	}
+	return qsNameList;
+}
+
 void MainWindow::on_pushButton_4_clicked()
 {
 	QString qsFilePath = QFileDialog::getExistingDirectory(nullptr, "chioce Directory", "");
@@ -996,19 +1065,46 @@ void MainWindow::on_pushButton_4_clicked()
 	{
 		return;
 	}
-	
+	uno::Reference<document::XStorageBasedDocument> xDocBaseStorage(m_xTextDoc, uno::UNO_QUERY_THROW);
+	uno::Reference<embed::XStorage> xDocStorage = xDocBaseStorage->getDocumentStorage();
 	QList<QListWidgetItem*> selectItemList = ui->listWidget_2->selectedItems();
 	for (int i = 0; i < selectItemList.count(); ++i)
 	{
 		QListWidgetItem* item = selectItemList.at(i);
 		QString fileName = item->text();
-		QByteArray data = item->data(Qt::UserRole + 1).toByteArray();
-		QString qsFilePath2 = qsFilePath + "/" + fileName;
-		QFile file(qsFilePath2);
-		if (file.open(QIODevice::WriteOnly))
+		rtl::OUString ousFileName = fileName.toStdWString().c_str();
+		if (xDocStorage->hasByName(ousFileName))
 		{
-			file.write(data);
-			file.close();
+			uno::Reference<io::XStream> xstream;
+			if (xDocStorage->isStreamElement(ousFileName))
+			{
+				xstream = xDocStorage->cloneStreamElement(ousFileName);
+			}
+			else if(xDocStorage->isStorageElement(ousFileName))
+			{
+				//TODO:
+			}
+			if (xstream.is())
+			{
+				uno::Reference<io::XInputStream> inputStream = xstream->getInputStream();
+				if (inputStream.is())
+				{
+					QByteArray srcData = readStreamToQByteArray(inputStream);
+					QString qsFileName;
+					QByteArray outData;
+					bool successful = getAttachmentInfo(srcData, qsFileName, outData);
+					if (successful)
+					{
+						QString qsFilePath2 = qsFilePath + "/" + qsFileName;
+						QFile file(qsFilePath2);
+						if (file.open(QIODevice::WriteOnly))
+						{
+							file.write(outData);
+							file.close();
+						}
+					}
+				}
+			}
 		}
 	}
 }

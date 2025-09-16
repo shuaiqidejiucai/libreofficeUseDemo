@@ -73,6 +73,13 @@ enum DocumentType
     UnKnown
 };
 
+struct ST_AttachmentInfo
+{
+    QString qsObjectName;
+    QString qsfFileName;
+    QByteArray fileData;
+};
+
 using namespace com::sun::star;
 class MainWindow : public QMainWindow
 {
@@ -111,19 +118,17 @@ private:
 
     void parseItem(libolecf_item_t* root_item, QHash<QString, QByteArray>& oleFileHash);
 
-    void getFileName(libolecf_item_t* root_item, QString& rootName);
+    void getOle10NativeData(libolecf_item_t* root_item, QString& rootName, QByteArray & outData);
 
-    bool parseOle10Native(const QByteArray& src, QString& outFileName, QByteArray& outData, bool getStream = true);
+    bool parseOle10Native(const QByteArray& src, QString& outFileName, QByteArray& outData);
 
     QByteArray readItemData(libolecf_item_t* item);
 
     QByteArray readStreamToQByteArray(const uno::Reference<io::XInputStream>& xIn);
-    
-    //// libcfb 相关函数
-    //void removeAttachmentCFB(const QString &attachmentName);
-    //void extractAttachmentCFB(const QString &attachmentName, const QString &outputPath);
-    //void insertAttachmentCFB(const QString &attachmentPath, const QString &attachmentName);
-    //
+
+    bool getAttachmentInfo(QByteArray & srcData, QString & fileName, QByteArray & outFileData);
+
+    QStringList getOLEAttachmentFileNameList(uno::Reference<embed::XStorage> XStorage);
 private:
     Ui::MainWindow *ui;
     uno::Reference<lang::XMultiComponentFactory > m_xMcf;
