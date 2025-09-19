@@ -58,13 +58,15 @@
 #include <com/sun/star/document/XEmbeddedObjectSupplier2.hpp>
 #include <com/sun/star/text/XTextField.hpp>
 #include <QMainWindow>
+#include <com/sun/star/drawing/XShapes.hpp>
+#include <qhash.h>
 
 QT_BEGIN_NAMESPACE
 namespace Ui {
 class MainWindow;
 }
 QT_END_NAMESPACE
-
+using namespace com::sun::star;
 enum DocumentType
 {
     Word,
@@ -80,7 +82,14 @@ struct ST_AttachmentInfo
     QByteArray fileData;
 };
 
-using namespace com::sun::star;
+//struct ST_ShapeCommon
+//{
+//    uno::Reference<drawing::XShapes> m_xShapes;
+//    uno::Reference<drawing::XShape> m_xShape;
+//};
+
+class QListWidgetItem;
+
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -103,6 +112,8 @@ private slots:
 
     //删除附件
     void on_pushButton_5_clicked();
+
+    void on_listWidget_customContextMenuRequested(const QPoint &pos);
 
 private:
     void reloadWord();
@@ -129,6 +140,10 @@ private:
     bool getAttachmentInfo(QByteArray & srcData, QString & fileName, QByteArray & outFileData);
 
     QStringList getOLEAttachmentFileNameList(uno::Reference<embed::XStorage> XStorage);
+
+    void processShape(uno::Reference<drawing::XShape> xShape, QStringList & qsStrList);
+
+    QListWidgetItem* ShapeToBitMap(uno::Reference<drawing::XShape> xShape);
 private:
     Ui::MainWindow *ui;
     uno::Reference<lang::XMultiComponentFactory > m_xMcf;
@@ -142,6 +157,6 @@ private:
     uno::Reference<uno::XComponentContext> m_xContext;
     DocumentType m_documentType;
     QString m_filePath;
-
+    QHash<QUuid, uno::Reference<drawing::XShape>> m_uUidShapeCommonHash;
 };
 #endif // MAINWINDOW_H

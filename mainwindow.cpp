@@ -18,12 +18,61 @@
 #include <com/sun/star/document/XLinkTargetSupplier.hpp>
 #include <com/sun/star/io/IOException.hpp>
 #include <com/sun/star/embed/InvalidStorageException.hpp>
+#include <com/sun/star/drawing/XDrawPagesSupplier.hpp>
+#include <com/sun/star/lang/XServiceInfo.hpp>
+#include <com/sun/star/drawing/XCustomShapeHandle.hpp>
+#include <qmenu.h>
+#include <qaction.h>
+#include <qqueue.h>
+#include <com/sun/star/container/XChild.hpp>
+#include <com/sun/star/drawing/XMasterPageTarget.hpp>
 
 QString OUStringToQString(const rtl::OUString& oustring)
 {
 	const char* ch2 = rtl::OUStringToOString(oustring, RTL_TEXTENCODING_UTF8).getStr();
 	return QString::fromUtf8(ch2);
 }
+
+void outputPropertySet(uno::Reference<beans::XPropertySet> propertySet)
+{
+	if (propertySet.is())
+	{
+		uno::Reference<beans::XPropertySetInfo> setInfo = propertySet->getPropertySetInfo();
+		if (setInfo.is())
+		{
+			uno::Sequence<beans::Property> propertyQuence = setInfo->getProperties();
+			int length = propertyQuence.getLength();
+			beans::Property* properArray = propertyQuence.getArray();
+			for (int i = 0; i < length; ++i)
+			{
+				beans::Property proper = properArray[i];
+				qDebug() << OUStringToQString(proper.Name);
+				uno::Any any = propertySet->getPropertyValue(proper.Name);
+				if (OUStringToQString(any.getValueTypeName()) == "string")
+				{
+					rtl::OUString str;
+					any >>= str;
+					qDebug() << "value:" << OUStringToQString(str);
+				}
+			}
+		}
+	}
+}
+
+void outNameContainter(uno::Reference<container::XNameContainer> xContainer3)
+{
+	uno::Sequence<rtl::OUString> containter3EleNames = xContainer3->getElementNames();
+	int containter3Count = containter3EleNames.getLength();
+	rtl::OUString* containter3Str = containter3EleNames.getArray();
+	for (int p = 0; p < containter3Count; ++p)
+	{
+		rtl::OUString container3Str = containter3Str[p];
+		qDebug() << OUStringToQString(container3Str);
+		uno::Any container3Any = xContainer3->getByName(container3Str);
+		qDebug() << OUStringToQString(container3Any.getValueTypeName());
+	}
+}
+
 class TerminationListener : public cppu::WeakImplHelper1<com::sun::star::frame::XTerminateListener> {
 public:
 	virtual void SAL_CALL queryTermination(const com::sun::star::lang::EventObject&) override
@@ -52,7 +101,7 @@ MainWindow::MainWindow(QWidget* parent)
 	, m_documentType(UnKnown)
 {
 	ui->setupUi(this);
-
+	ui->listWidget->setContextMenuPolicy(Qt::ContextMenuPolicy::CustomContextMenu);
 	try
 	{
 		uno::Reference<uno::XComponentContext> xContext2 = cppu::bootstrap();
@@ -122,6 +171,7 @@ void MainWindow::reLoader()
 {
 	ui->listWidget->clear();
 	ui->textEdit->clear();
+	m_uUidShapeCommonHash.clear();
 
 	switch (m_documentType)
 	{
@@ -337,8 +387,7 @@ void MainWindow::reloadWord()
 			break;
 		}
 		rtl::OUString paragraphText = xPara->getString();
-		const char* ch = rtl::OUStringToOString(paragraphText, RTL_TEXTENCODING_UTF8).getStr();
-		qsStrText += QString::fromUtf8(ch);
+		qsStrText += OUStringToQString(paragraphText);
 	}
 	ui->textEdit->setText(qsStrText);
 	uno::Reference<text::XTextGraphicObjectsSupplier> obj (m_xComponent, uno::UNO_QUERY);
@@ -351,31 +400,14 @@ void MainWindow::reloadWord()
 		rtl::OUString nameStrObj = nameStr[eleIndex];
 		uno::Any varant = nameAccess->getByName(nameStrObj);
 		uno::Reference<drawing::XShape> xShape(varant, uno::UNO_QUERY);
-		uno::Reference<beans::XPropertySet> xPropSet(xShape, uno::UNO_QUERY);
-
-		uno::Any graphicAny = xPropSet->getPropertyValue("Graphic");
-		uno::Reference<graphic::XGraphic> xGraphic;
-		graphicAny >>= xGraphic;
-		uno::Reference<awt::XBitmap> xBitmap(xGraphic, uno::UNO_QUERY);
-		if (xBitmap.is())
-		{
-			awt::Size size = xBitmap->getSize();
-			QImage image(size.Width, size.Height, QImage::Format_ARGB32);
-			uno::Sequence<::sal_Int8> uInt8 = xBitmap->getDIB();
-			image.loadFromData((uchar*)uInt8.getArray(), size.Width * size.Height * 8);
-			image = image.scaled(50, 100, Qt::AspectRatioMode::IgnoreAspectRatio);
-			QListWidgetItem* item = new QListWidgetItem;
-			item->setSizeHint(QSize(50, 100));
-			ui->listWidget->addItem(item);
-			QLabel* label = new QLabel();
-			label->setPixmap(QPixmap::fromImage(image));
-			ui->listWidget->setItemWidget(item, label);
-			label->show();
-		}
-		qDebug() << OUStringToQString(nameStrObj);
+		QListWidgetItem * item = ShapeToBitMap(xShape);
+		QString qsImageName = OUStringToQString(nameStrObj);
+		
+		QUuid uuid = QUuid::createUuid();
+		item->setData(Qt::UserRole + 1, uuid);
+		m_uUidShapeCommonHash[uuid] = xShape;
 	}
 
-	//附件的对象名不是附件名，不需要真名
 	ui->listWidget_2->clear();
 	uno::Reference<document::XStorageBasedDocument> xDocBaseStorage(m_xTextDoc, uno::UNO_QUERY_THROW);
 	uno::Reference<embed::XStorage> xDocStorage = xDocBaseStorage->getDocumentStorage();
@@ -428,10 +460,309 @@ void MainWindow::reloadExcel()
 		}
 	}
 }
+//#include <com/sun/star/drawing/XTableShape.hpp>
+// 细粒度抽段落（shapeText 可为空时 fallback）
+static void extractParagraphs(const uno::Reference<text::XText>& xText,
+	QStringList& out) {
+	if (!xText.is()) return;
+	uno::Reference<container::XEnumerationAccess> paraAccess(xText, uno::UNO_QUERY);
+	if (!paraAccess.is()) {
+		rtl::OUString full = xText->getString();
+		if (full.getLength() > 0) {
+			QString s = OUStringToQString(full);
+			// 保留换行拆段
+			for (auto& line : s.split('\n')) {
+				QString t = line.trimmed();
+				if (!t.isEmpty()) out << t;
+			}
+		}
+		return;
+	}
+	uno::Reference<container::XEnumeration> paraEnum = paraAccess->createEnumeration();
+	while (paraEnum.is() && paraEnum->hasMoreElements()) {
+		uno::Reference<text::XTextRange> para(paraEnum->nextElement(), uno::UNO_QUERY);
+		if (!para.is()) continue;
+		QString p = OUStringToQString(para->getString()).trimmed();
+		if (!p.isEmpty()) out << p;
+	}
+}
+
+static const char* presentationShapes[] = {
+		   "com.sun.star.presentation.TitleTextShape",
+		   "com.sun.star.presentation.OutlinerShape",
+		   "com.sun.star.presentation.SubtitleShape",
+		   "com.sun.star.presentation.NotesShape",
+		   "com.sun.star.presentation.HeaderShape",
+		   "com.sun.star.presentation.FooterShape",
+		   "com.sun.star.presentation.DateTimeShape",
+		   "com.sun.star.presentation.SlideNumberShape"
+};
+
+void MainWindow::processShape(uno::Reference<drawing::XShape> xShape, QStringList& qsStrList)
+{
+	if (!xShape.is()) return;
+
+	uno::Reference<lang::XServiceInfo> xInfo(xShape, uno::UNO_QUERY);
+	if (!xInfo.is()) return;
+	for (const char* shapeType : presentationShapes) {
+		if (xInfo->supportsService(rtl::OUString::createFromAscii(shapeType))) {
+			uno::Reference<text::XText> xText(xShape, uno::UNO_QUERY);
+			if (xText.is()) {
+				// 官方方式：使用段落枚举而不是直接getString()
+				uno::Reference<container::XEnumerationAccess> xParaAccess(xText, uno::UNO_QUERY);
+				if (xParaAccess.is()) {
+					uno::Reference<container::XEnumeration> xParaEnum = xParaAccess->createEnumeration();
+					while (xParaEnum->hasMoreElements()) {
+						uno::Reference<text::XTextRange> xPara(xParaEnum->nextElement(), uno::UNO_QUERY);
+						if (xPara.is()) {
+							QString tmpStr = OUStringToQString(xPara->getString());
+							if (!tmpStr.isEmpty())
+							{
+								qsStrList.append(tmpStr);
+							}
+						}
+					}
+				}
+				else {
+					// fallback
+					QString tmpStr = OUStringToQString(xText->getString());
+					if (!tmpStr.isEmpty())
+					{
+						qsStrList.append(tmpStr);
+					}
+				}
+			}
+			return; 
+		}
+	}
+
+	if (xInfo->supportsService("com.sun.star.drawing.GroupShape")) {
+		uno::Reference<drawing::XShapes> xGroupShapes(xShape, uno::UNO_QUERY);
+		if (xGroupShapes.is()) {
+			sal_Int32 count = xGroupShapes->getCount();
+			for (sal_Int32 i = 0; i < count; ++i) {
+				processShape(uno::Reference<drawing::XShape>(xGroupShapes->getByIndex(i), uno::UNO_QUERY), qsStrList);
+			}
+		}
+		return;
+	}
+
+	if (xInfo->supportsService("com.sun.star.drawing.CustomShape")) {
+		uno::Reference<beans::XPropertySet> xProps(xShape, uno::UNO_QUERY);
+		if (xProps.is()) {
+			try {
+				if (xProps->getPropertySetInfo()->hasPropertyByName("String")) {
+					rtl::OUString propText;
+					xProps->getPropertyValue("String") >>= propText;
+					QString tmpStr = OUStringToQString(propText);
+					if (!tmpStr.isEmpty())
+					{
+						qsStrList.append(tmpStr);
+					}
+				}
+			}
+			catch (...) {}
+		}
+		uno::Reference<text::XText> xText(xShape, uno::UNO_QUERY);
+		if (xText.is()) {
+			uno::Reference<container::XEnumerationAccess> xParaAccess(xText, uno::UNO_QUERY);
+			if (xParaAccess.is()) {
+				uno::Reference<container::XEnumeration> xParaEnum = xParaAccess->createEnumeration();
+				while (xParaEnum->hasMoreElements()) {
+					uno::Reference<text::XTextRange> xPara(xParaEnum->nextElement(), uno::UNO_QUERY);
+					if (xPara.is()) {
+						QString tmpStr = OUStringToQString(xPara->getString());
+						if (!tmpStr.isEmpty())
+						{
+							qsStrList.append(tmpStr);
+						}
+					}
+				}
+			}
+			else {
+				QString tmpStr = OUStringToQString(xText->getString());
+				if (!tmpStr.isEmpty())
+				{
+					qsStrList.append(tmpStr);
+				}
+			}
+		}
+		return;
+	}
+
+	if (xInfo->supportsService("com.sun.star.drawing.GraphicObjectShape")) 
+	{
+		uno::Reference<beans::XPropertySet> xProps(xShape, uno::UNO_QUERY);
+		if (xProps.is()) {
+			try {
+				rtl::OUString title, desc;
+				if (xProps->getPropertySetInfo()->hasPropertyByName("Title")) {
+					xProps->getPropertyValue("Title") >>= title;
+					QString tmpStr = OUStringToQString(title);
+					if (!tmpStr.isEmpty())
+					{
+						qsStrList.append(tmpStr);
+					}
+				}
+				if (xProps->getPropertySetInfo()->hasPropertyByName("Description")) {
+					xProps->getPropertyValue("Description") >>= desc;
+					QString tmpStr = OUStringToQString(desc);
+					if (!tmpStr.isEmpty())
+					{
+						qsStrList.append(tmpStr);
+					}
+				}
+				QListWidgetItem * item = ShapeToBitMap(xShape);
+				QUuid uuid = QUuid::createUuid();
+				if (item)
+				{
+					item->setData(Qt::UserRole + 1, uuid);
+				}
+				m_uUidShapeCommonHash[uuid] = xShape;
+			}
+			catch (...) {}
+		}
+	}
+
+	if (xInfo->supportsService("com.sun.star.drawing.TextShape") ||
+		xInfo->supportsService("com.sun.star.text.TextFrame")) {
+		uno::Reference<text::XText> xText(xShape, uno::UNO_QUERY);
+		if (xText.is()) {
+			uno::Reference<container::XEnumerationAccess> xParaAccess(xText, uno::UNO_QUERY);
+			if (xParaAccess.is()) {
+				uno::Reference<container::XEnumeration> xParaEnum = xParaAccess->createEnumeration();
+				while (xParaEnum->hasMoreElements()) {
+					uno::Reference<text::XTextRange> xPara(xParaEnum->nextElement(), uno::UNO_QUERY);
+					if (xPara.is()) {
+						QString tmpStr = OUStringToQString(xPara->getString());
+						if (!tmpStr.isEmpty())
+						{
+							qsStrList.append(tmpStr);
+						}
+					}
+				}
+			}
+			else {
+				QString tmpStr = OUStringToQString(xText->getString());
+				if (!tmpStr.isEmpty())
+				{
+					qsStrList.append(tmpStr);
+				}
+			}
+		}
+		return;
+	}
+
+	uno::Reference<text::XText> xText(xShape, uno::UNO_QUERY);
+	if (xText.is()) {
+		uno::Reference<container::XEnumerationAccess> xParaAccess(xText, uno::UNO_QUERY);
+		if (xParaAccess.is()) {
+			uno::Reference<container::XEnumeration> xParaEnum = xParaAccess->createEnumeration();
+			while (xParaEnum->hasMoreElements()) {
+				uno::Reference<text::XTextRange> xPara(xParaEnum->nextElement(), uno::UNO_QUERY);
+				if (xPara.is()) {
+					QString tmpStr = OUStringToQString(xPara->getString());
+					if (!tmpStr.isEmpty())
+					{
+						qsStrList.append(tmpStr);
+					}
+				}
+			}
+		}
+		else {
+			QString tmpStr = OUStringToQString(xText->getString());
+			if (!tmpStr.isEmpty())
+			{
+				qsStrList.append(tmpStr);
+			}
+		}
+	}
+}
+
+QListWidgetItem* MainWindow::ShapeToBitMap(uno::Reference<drawing::XShape> xShape)
+{
+	if (!xShape.is())
+	{
+		return nullptr;
+	}
+
+	uno::Reference<beans::XPropertySet> xProps(xShape, uno::UNO_QUERY);
+	if (!xProps.is())
+	{
+		return nullptr;
+	}
+
+	if (xProps->getPropertySetInfo()->hasPropertyByName("Graphic"))
+	{
+		uno::Any graphicAny = xProps->getPropertyValue("Graphic");
+		uno::Reference<graphic::XGraphic> xGraphic;
+		graphicAny >>= xGraphic;
+		uno::Reference<awt::XBitmap> xBitmap(xGraphic, uno::UNO_QUERY);
+		if (xBitmap.is())
+		{
+			awt::Size size = xBitmap->getSize();
+			QImage image(size.Width, size.Height, QImage::Format_ARGB32);
+			uno::Sequence<::sal_Int8> uInt8 = xBitmap->getDIB();
+			image.loadFromData((uchar*)uInt8.getArray(), size.Width * size.Height * 8);
+			image = image.scaled(50, 100, Qt::AspectRatioMode::IgnoreAspectRatio);
+			QListWidgetItem* item = new QListWidgetItem;
+			item->setSizeHint(QSize(50, 100));
+			ui->listWidget->addItem(item);
+			QLabel* label = new QLabel();
+			label->setAttribute(Qt::WA_TransparentForMouseEvents);
+			label->setPixmap(QPixmap::fromImage(image));
+			ui->listWidget->setItemWidget(item, label);
+			label->show();
+			return item;
+		}
+	}
+	return nullptr;
+}
 
 void MainWindow::reloadPowerPoint()
 {
+	uno::Reference<drawing::XDrawPagesSupplier> xPagesSupplier(m_xComponent, uno::UNO_QUERY);
+	if (!xPagesSupplier.is()) return ;
 
+	uno::Reference<drawing::XDrawPages> xPages = xPagesSupplier->getDrawPages();
+	if (!xPages.is() || xPages->getCount() == 0) return ;
+
+	int length = xPages->getCount();
+	QStringList contentList;
+	for (int i = 0; i < length; ++i)
+	{
+		uno::Any pageAny = xPages->getByIndex(i);
+		uno::Reference<drawing::XDrawPage> xPage(pageAny, uno::UNO_QUERY);
+		if (!xPage.is()) continue;
+		// 官方建议：先处理母版页的文字
+		uno::Reference<drawing::XMasterPageTarget> xMasterTarget(xPage, uno::UNO_QUERY);
+		if (xMasterTarget.is()) {
+			uno::Reference<drawing::XDrawPage> xMasterPage = xMasterTarget->getMasterPage();
+			if (xMasterPage.is()) {
+				uno::Reference<drawing::XShapes> xMasterShapes(xMasterPage, uno::UNO_QUERY);
+				if (xMasterShapes.is()) {
+					sal_Int32 masterCount = xMasterShapes->getCount();
+					for (sal_Int32 i = 0; i < masterCount; ++i) 
+					{
+						processShape(uno::Reference<drawing::XShape>(xMasterShapes->getByIndex(i), uno::UNO_QUERY), contentList);
+					}
+				}
+			}
+		}
+
+		// 处理页面本身的形状
+		uno::Reference<drawing::XShapes> xShapes(xPage, uno::UNO_QUERY);
+		if (xShapes.is()) {
+			sal_Int32 shapeCount = xShapes->getCount();
+			for (sal_Int32 i = 0; i < shapeCount; ++i) {
+				processShape(uno::Reference<drawing::XShape>(xShapes->getByIndex(i), uno::UNO_QUERY), contentList);
+			}
+		}
+	}
+
+	ui->textEdit->clear();
+	contentList.removeDuplicates();
+	ui->textEdit->setText(contentList.join("\n"));
 }
 
 void MainWindow::insertAttachment(const uno::Reference<lang::XComponent>& xComponent, const QByteArray& fileData, const QString& fileName)
@@ -553,39 +884,6 @@ void MainWindow::insertAttachment(const uno::Reference<lang::XComponent>& xCompo
 			}
 		}
 		file.close();
-	}
-}
-
-void outputPropertySet(uno::Reference<beans::XPropertySet> propertySet)
-{
-	if (propertySet.is())
-	{
-		uno::Reference<beans::XPropertySetInfo> setInfo = propertySet->getPropertySetInfo();
-		if (setInfo.is())
-		{
-			uno::Sequence<beans::Property> propertyQuence = setInfo->getProperties();
-			int length = propertyQuence.getLength();
-			beans::Property* properArray = propertyQuence.getArray();
-			for (int i = 0; i < length; ++i)
-			{
-				beans::Property proper = properArray[i];
-				qDebug() << OUStringToQString(proper.Name);
-			}
-		}
-	}
-}
-
-void outNameContainter(uno::Reference<container::XNameContainer> xContainer3)
-{
-	uno::Sequence<rtl::OUString> containter3EleNames = xContainer3->getElementNames();
-	int containter3Count = containter3EleNames.getLength();
-	rtl::OUString* containter3Str = containter3EleNames.getArray();
-	for (int p = 0; p < containter3Count; ++p)
-	{
-		rtl::OUString container3Str = containter3Str[p];
-		qDebug() << OUStringToQString(container3Str);
-		uno::Any container3Any = xContainer3->getByName(container3Str);
-		qDebug() << OUStringToQString(container3Any.getValueTypeName());
 	}
 }
 
@@ -1120,5 +1418,53 @@ void MainWindow::on_pushButton_5_clicked()
 		removeAttachment(fileName);
 	}
 	reLoader();
+}
+
+void MainWindow::on_listWidget_customContextMenuRequested(const QPoint &pos)
+{
+	QString actionText;
+	QMenu menu(ui->listWidget);
+	menu.addAction("delete");
+	QPoint globalPos = ui->listWidget->mapToGlobal(pos);
+	QAction* action = menu.exec(globalPos);
+	if (!action)
+	{
+		return;
+	}
+	QListWidgetItem* item = ui->listWidget->itemAt(pos);
+	if (!item)
+	{
+		return;
+	}
+	QUuid uuid = item->data(Qt::UserRole + 1).toUuid();
+
+	uno::Reference<drawing::XShape> xshap2 =m_uUidShapeCommonHash[uuid];
+	uno::Reference<container::XChild> childShape(xshap2, uno::UNO_QUERY);
+	if (childShape.is())
+	{
+		uno::Reference<drawing::XShapes> shapeParent(childShape->getParent(), uno::UNO_QUERY);
+		if (shapeParent.is())
+		{
+			shapeParent->remove(xshap2);
+		}
+	}	
+	else 
+	{
+		uno::Reference<text::XTextContent> xContent(xshap2, uno::UNO_QUERY);
+		if (xContent.is())
+		{
+			uno::Reference<text::XText> xText = m_xTextDoc->getText();
+			if (xText.is())
+			{
+				xText->removeTextContent(xContent);
+				m_uUidShapeCommonHash.remove(uuid);
+			}
+		}
+	}
+	uno::Reference<frame::XStorable> xStorable(m_xComponent, uno::UNO_QUERY);
+	if (xStorable.is()) xStorable->store();
+
+	reLoader();
+	return;
 }
 
